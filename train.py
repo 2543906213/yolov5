@@ -96,6 +96,8 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 # https://pytorch.org/docs/stable/elastic/run.html
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))
+# 从环境变量中获取一个名为 RANK 的值，并将其转换为整数。
+# 如果环境变量 RANK 不存在，则使用默认值 -1。
 RANK = int(os.getenv("RANK", -1))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
 GIT_INFO = check_git_info()
@@ -728,10 +730,14 @@ def parse_opt(known=False):
 
 
 def main(opt, callbacks=Callbacks()):
+
+    # 使用指定的选项和可选的回调函数运行训练或超参数进化的主要入口点。
     """
     Runs the main entry point for training or hyperparameter evolution with specified options and optional callbacks.
 
     Args:
+    # opt 是一个 argparse.Namespace 对象，包含了 YOLOv5 训练和进化的命令行参数。
+    # callbacks 是一个 Callbacks 对象，包含了各个训练阶段的回调函数。
         opt (argparse.Namespace): The command-line arguments parsed for YOLOv5 training and evolution.
         callbacks (ultralytics.utils.callbacks.Callbacks, optional): Callback functions for various training stages.
             Defaults to Callbacks().
@@ -743,13 +749,34 @@ def main(opt, callbacks=Callbacks()):
         For detailed usage, refer to:
         https://github.com/ultralytics/yolov5/tree/master/models
     """
+
+    # 检查变量 RANK 是否在集合 {-1, 0} 中。
+    # RANK 通常用于表示当前进程的排名或身份。
+    # 例如，在分布式训练中，RANK 为 0 的进程通常是主进程，而其他进程则是辅助进程。
+    # 当 RANK 为 -1 或 0 时，表示当前进程是主进程或单进程模式，因此需要执行以下操作。
     if RANK in {-1, 0}:
+        # 用于记录调用函数的参数。
+        # vars(opt) 将 opt 对象转换为字典，包含所有命令行解析后的参数。
+        # 这行代码的作用是打印或记录当前训练或进化过程的所有参数，方便调试和日志记录。
         print_args(vars(opt))
+        # 用于检查当前代码库是否与远程仓库同步。
+        # 该函数会检查当前代码库是否是一个 Git 仓库，是否在线，并且是否有未拉取的更新。
+        # 如果代码库有更新，它会提示用户运行 git pull 命令来更新代码库。
         check_git_status()
+        # 用于检查当前环境中的依赖项是否满足要求。
+        # 该函数会读取 requirements.txt 文件中的依赖项，并检查这些依赖项是否已经安装且版本符合要求。
+        # 如果某些依赖项未安装或版本不符合要求，它会尝试自动安装或更新这些依赖项。
         check_requirements(ROOT / "requirements.txt")
 
     # Resume (from specified or most recent last.pt)
+    # 检查 opt.resume 是否为 True，如果是，则表示需要恢复最近的训练检查点。
+    # 这段代码处理了训练过程中的恢复选项，决定是否从之前的检查点恢复训练。
+    '''首先检查是否需要恢复训练。条件包括 opt.resume 为真，
+     且 check_comet_resume(opt) 和 opt.evolve 都为假。'''
     if opt.resume and not check_comet_resume(opt) and not opt.evolve:
+        '''确定恢复的检查点文件路径。
+        如果 opt.resume 是字符串，则使用 check_file(opt.resume) 获取文件路径；
+        否则，调用 get_latest_run() 获取最近的运行记录。'''
         last = Path(check_file(opt.resume) if isinstance(
             opt.resume, str) else get_latest_run())
         opt_yaml = last.parent.parent / "opt.yaml"  # train options yaml
