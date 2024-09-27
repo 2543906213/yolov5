@@ -28,8 +28,7 @@ Usage - formats:
                                  yolov5s_paddle_model       # PaddlePaddle
 """
 
-'''============================================================1.导入所需的库=================================================================='''
-
+# =====================================================1.导入所需的库==================================================
 
 from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from models.common import DetectMultiBackend
@@ -42,16 +41,19 @@ import sys
 from pathlib import Path
 import torch
 
-'''============================================================2.获取当前文件路径=================================================================='''
-
-FILE = Path(__file__).resolve()
-ROOT = FILE.parents[0]  # YOLOv5 root directory
+# =====================================================2.获取当前文件路径==================================================
+FILE = Path(__file__).resolve()  # 获取当前脚本文件的绝对路径
+ROOT = FILE.parents[0]  # 获取当前脚本文件的父目录，
+# parents属性返回一个Path对象，包含当前路径的所有父目录的序列，0表示获取第一个父目录，即当前脚本文件所在的目录。
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 
-
+# detect.py主要有run(),parse_opt(),main()三个函数构成。
+# smart_inference_mode()用于自动切换模型的推理模式，如果是FP16模型，则自动切换为FP16推理模式，
+# 否则切换为FP32推理模式，这样可以避免模型推理时出现类型不匹配的错误
+# 传入参数，参数可通过命令行传入，也可通过代码传入，parser.add_argument()函数用于添加参数
 @smart_inference_mode()
 def run(
     weights=ROOT / "yolov5s.pt",  # model path or triton URL
@@ -135,11 +137,18 @@ def run(
         run(source='data/videos/example.mp4', weights='yolov5s.pt', conf_thres=0.4, device='0')
         ```
     """
+
+    # ================================== 初始化参数=====================================================
+
+    # 将source转换为字符串，source为输入的图片、视频、摄像头等
     source = str(source)
     save_img = not nosave and not source.endswith(
-        ".txt")  # save inference images
+        ".txt")  # 判断是否保存图片，如果nosave为False，且source不是txt文件，则保存图片
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
+    # 判断source是否是文件.Path(source)使用source创建一个Path对象，用于获取输入源信息，
+    # suffix获取文件扩展名：.jpg,.mp4等，suffix[1:]获取文件后缀，判断后缀是否在IMG_FORMATS和VID_FORMATS中，如果是，则is_file为True
     is_url = source.lower().startswith(("rtsp://", "rtmp://", "http://", "https://"))
+    # 判断source是否是url，如果是，则is_url为True.lower()将字符串转换为小写,startswith()判断字符串是否以指定的字符串开头
     webcam = source.isnumeric() or source.endswith(
         ".streams") or (is_url and not is_file)
     screenshot = source.lower().startswith("screen")

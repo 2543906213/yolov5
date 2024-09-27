@@ -14,6 +14,55 @@ Datasets:   https://github.com/ultralytics/yolov5/tree/master/data
 Tutorial:   https://docs.ultralytics.com/yolov5/tutorials/train_custom_data
 """
 
+from utils.torch_utils import (
+    EarlyStopping,
+    ModelEMA,
+    de_parallel,
+    select_device,
+    smart_DDP,
+    smart_optimizer,
+    smart_resume,
+    torch_distributed_zero_first,
+)
+from utils.plots import plot_evolve
+from utils.metrics import fitness
+from utils.loss import ComputeLoss
+from utils.loggers.comet.comet_utils import check_comet_resume
+from utils.loggers import LOGGERS, Loggers
+from utils.general import (
+    LOGGER,
+    TQDM_BAR_FORMAT,
+    check_amp,
+    check_dataset,
+    check_file,
+    check_git_info,
+    check_git_status,
+    check_img_size,
+    check_requirements,
+    check_suffix,
+    check_yaml,
+    colorstr,
+    get_latest_run,
+    increment_path,
+    init_seeds,
+    intersect_dicts,
+    labels_to_class_weights,
+    labels_to_image_weights,
+    methods,
+    one_cycle,
+    print_args,
+    print_mutation,
+    strip_optimizer,
+    yaml_save,
+)
+from utils.downloads import attempt_download, is_url
+from utils.dataloaders import create_dataloader
+from utils.callbacks import Callbacks
+from utils.autobatch import check_train_batch_size
+from utils.autoanchor import check_anchors
+from models.yolo import Model
+from models.experimental import attempt_load
+import val as validate  # for end-of-epoch mAP
 import argparse
 import math
 import os
@@ -44,57 +93,9 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
-import val as validate  # for end-of-epoch mAP
-from models.experimental import attempt_load
-from models.yolo import Model
-from utils.autoanchor import check_anchors
-from utils.autobatch import check_train_batch_size
-from utils.callbacks import Callbacks
-from utils.dataloaders import create_dataloader
-from utils.downloads import attempt_download, is_url
-from utils.general import (
-    LOGGER,
-    TQDM_BAR_FORMAT,
-    check_amp,
-    check_dataset,
-    check_file,
-    check_git_info,
-    check_git_status,
-    check_img_size,
-    check_requirements,
-    check_suffix,
-    check_yaml,
-    colorstr,
-    get_latest_run,
-    increment_path,
-    init_seeds,
-    intersect_dicts,
-    labels_to_class_weights,
-    labels_to_image_weights,
-    methods,
-    one_cycle,
-    print_args,
-    print_mutation,
-    strip_optimizer,
-    yaml_save,
-)
-from utils.loggers import LOGGERS, Loggers
-from utils.loggers.comet.comet_utils import check_comet_resume
-from utils.loss import ComputeLoss
-from utils.metrics import fitness
-from utils.plots import plot_evolve
-from utils.torch_utils import (
-    EarlyStopping,
-    ModelEMA,
-    de_parallel,
-    select_device,
-    smart_DDP,
-    smart_optimizer,
-    smart_resume,
-    torch_distributed_zero_first,
-)
 
-LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))  # https://pytorch.org/docs/stable/elastic/run.html
+# https://pytorch.org/docs/stable/elastic/run.html
+LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))
 RANK = int(os.getenv("RANK", -1))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
 GIT_INFO = check_git_info()
@@ -160,7 +161,8 @@ def train(hyp, opt, device, callbacks):
     if isinstance(hyp, str):
         with open(hyp, errors="ignore") as f:
             hyp = yaml.safe_load(f)  # load hyps dict
-    LOGGER.info(colorstr("hyperparameters: ") + ", ".join(f"{k}={v}" for k, v in hyp.items()))
+    LOGGER.info(colorstr("hyperparameters: ") +
+                ", ".join(f"{k}={v}" for k, v in hyp.items()))
     opt.hyp = hyp.copy()  # for saving hyps to checkpoints
 
     # Save run settings
@@ -203,28 +205,39 @@ def train(hyp, opt, device, callbacks):
         data_dict = data_dict or check_dataset(data)  # check if None
     train_path, val_path = data_dict["train"], data_dict["val"]
     nc = 1 if single_cls else int(data_dict["nc"])  # number of classes
-    names = {0: "item"} if single_cls and len(data_dict["names"]) != 1 else data_dict["names"]  # class names
-    is_coco = isinstance(val_path, str) and val_path.endswith("coco/val2017.txt")  # COCO dataset
+    names = {0: "item"} if single_cls and len(
+        data_dict["names"]) != 1 else data_dict["names"]  # class names
+    is_coco = isinstance(val_path, str) and val_path.endswith(
+        "coco/val2017.txt")  # COCO dataset
 
     # Model
     check_suffix(weights, ".pt")  # check weights
     pretrained = weights.endswith(".pt")
     if pretrained:
         with torch_distributed_zero_first(LOCAL_RANK):
-            weights = attempt_download(weights)  # download if not found locally
-        ckpt = torch.load(weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
-        model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
-        exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
-        csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
-        csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
+            # download if not found locally
+            weights = attempt_download(weights)
+        # load checkpoint to CPU to avoid CUDA memory leak
+        ckpt = torch.load(weights, map_location="cpu")
+        model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get(
+            "anchors")).to(device)  # create
+        exclude = ["anchor"] if (cfg or hyp.get(
+            "anchors")) and not resume else []  # exclude keys
+        # checkpoint state_dict as FP32
+        csd = ckpt["model"].float().state_dict()
+        csd = intersect_dicts(csd, model.state_dict(),
+                              exclude=exclude)  # intersect
         model.load_state_dict(csd, strict=False)  # load
-        LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
+        LOGGER.info(
+            f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
     else:
-        model = Model(cfg, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
+        model = Model(cfg, ch=3, nc=nc, anchors=hyp.get(
+            "anchors")).to(device)  # create
     amp = check_amp(model)  # check AMP
 
     # Freeze
-    freeze = [f"model.{x}." for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
+    freeze = [f"model.{x}." for x in (freeze if len(
+        freeze) > 1 else range(freeze[0]))]  # layers to freeze
     for k, v in model.named_parameters():
         v.requires_grad = True  # train all layers
         # v.register_hook(lambda x: torch.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
@@ -234,7 +247,8 @@ def train(hyp, opt, device, callbacks):
 
     # Image size
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
-    imgsz = check_img_size(opt.imgsz, gs, floor=gs * 2)  # verify imgsz is gs-multiple
+    # verify imgsz is gs-multiple
+    imgsz = check_img_size(opt.imgsz, gs, floor=gs * 2)
 
     # Batch size
     if RANK == -1 and batch_size == -1:  # single-GPU only, estimate best batch size
@@ -243,9 +257,11 @@ def train(hyp, opt, device, callbacks):
 
     # Optimizer
     nbs = 64  # nominal batch size
-    accumulate = max(round(nbs / batch_size), 1)  # accumulate loss before optimizing
+    # accumulate loss before optimizing
+    accumulate = max(round(nbs / batch_size), 1)
     hyp["weight_decay"] *= batch_size * accumulate / nbs  # scale weight_decay
-    optimizer = smart_optimizer(model, opt.optimizer, hyp["lr0"], hyp["momentum"], hyp["weight_decay"])
+    optimizer = smart_optimizer(
+        model, opt.optimizer, hyp["lr0"], hyp["momentum"], hyp["weight_decay"])
 
     # Scheduler
     if opt.cos_lr:
@@ -256,7 +272,8 @@ def train(hyp, opt, device, callbacks):
             """Linear learning rate scheduler function with decay calculated by epoch proportion."""
             return (1 - x / epochs) * (1.0 - hyp["lrf"]) + hyp["lrf"]  # linear
 
-    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
+    # plot_lr_scheduler(optimizer, scheduler, epochs)
+    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
 
     # EMA
     ema = ModelEMA(model) if RANK in {-1, 0} else None
@@ -265,7 +282,8 @@ def train(hyp, opt, device, callbacks):
     best_fitness, start_epoch = 0.0, 0
     if pretrained:
         if resume:
-            best_fitness, start_epoch, epochs = smart_resume(ckpt, optimizer, ema, weights, epochs, resume)
+            best_fitness, start_epoch, epochs = smart_resume(
+                ckpt, optimizer, ema, weights, epochs, resume)
         del ckpt, csd
 
     # DP mode
@@ -323,7 +341,9 @@ def train(hyp, opt, device, callbacks):
 
         if not resume:
             if not opt.noautoanchor:
-                check_anchors(dataset, model=model, thr=hyp["anchor_t"], imgsz=imgsz)  # run AutoAnchor
+                # run AutoAnchor
+                check_anchors(dataset, model=model,
+                              thr=hyp["anchor_t"], imgsz=imgsz)
             model.half().float()  # pre-reduce anchor precision
 
         callbacks.run("on_pretrain_routine_end", labels, names)
@@ -333,24 +353,28 @@ def train(hyp, opt, device, callbacks):
         model = smart_DDP(model)
 
     # Model attributes
-    nl = de_parallel(model).model[-1].nl  # number of detection layers (to scale hyps)
+    # number of detection layers (to scale hyps)
+    nl = de_parallel(model).model[-1].nl
     hyp["box"] *= 3 / nl  # scale to layers
     hyp["cls"] *= nc / 80 * 3 / nl  # scale to classes and layers
     hyp["obj"] *= (imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
     hyp["label_smoothing"] = opt.label_smoothing
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model
-    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
+    model.class_weights = labels_to_class_weights(
+        dataset.labels, nc).to(device) * nc  # attach class weights
     model.names = names
 
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
-    nw = max(round(hyp["warmup_epochs"] * nb), 100)  # number of warmup iterations, max(3 epochs, 100 iterations)
+    # number of warmup iterations, max(3 epochs, 100 iterations)
+    nw = max(round(hyp["warmup_epochs"] * nb), 100)
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     last_opt_step = -1
     maps = np.zeros(nc)  # mAP per class
-    results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
+    # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
+    results = (0, 0, 0, 0, 0, 0, 0)
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
@@ -362,15 +386,18 @@ def train(hyp, opt, device, callbacks):
         f"Logging results to {colorstr('bold', save_dir)}\n"
         f'Starting training for {epochs} epochs...'
     )
-    for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+    # epoch ------------------------------------------------------------------
+    for epoch in range(start_epoch, epochs):
         callbacks.run("on_train_epoch_start")
         model.train()
 
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
             cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
-            iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # image weights
-            dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
+            iw = labels_to_image_weights(
+                dataset.labels, nc=nc, class_weights=cw)  # image weights
+            dataset.indices = random.choices(
+                range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
 
         # Update mosaic border (optional)
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
@@ -380,38 +407,50 @@ def train(hyp, opt, device, callbacks):
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
-        LOGGER.info(("\n" + "%11s" * 7) % ("Epoch", "GPU_mem", "box_loss", "obj_loss", "cls_loss", "Instances", "Size"))
+        LOGGER.info(("\n" + "%11s" * 7) % ("Epoch", "GPU_mem",
+                    "box_loss", "obj_loss", "cls_loss", "Instances", "Size"))
         if RANK in {-1, 0}:
-            pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
+            # progress bar
+            pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        # batch -------------------------------------------------------------
+        for i, (imgs, targets, paths, _) in pbar:
             callbacks.run("on_train_batch_start")
-            ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+            # number integrated batches (since train start)
+            ni = i + nb * epoch
+            imgs = imgs.to(device, non_blocking=True).float() / \
+                255  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
                 # compute_loss.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
-                accumulate = max(1, np.interp(ni, xi, [1, nbs / batch_size]).round())
+                accumulate = max(1, np.interp(
+                    ni, xi, [1, nbs / batch_size]).round())
                 for j, x in enumerate(optimizer.param_groups):
                     # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
-                    x["lr"] = np.interp(ni, xi, [hyp["warmup_bias_lr"] if j == 0 else 0.0, x["initial_lr"] * lf(epoch)])
+                    x["lr"] = np.interp(
+                        ni, xi, [hyp["warmup_bias_lr"] if j == 0 else 0.0, x["initial_lr"] * lf(epoch)])
                     if "momentum" in x:
-                        x["momentum"] = np.interp(ni, xi, [hyp["warmup_momentum"], hyp["momentum"]])
+                        x["momentum"] = np.interp(
+                            ni, xi, [hyp["warmup_momentum"], hyp["momentum"]])
 
             # Multi-scale
             if opt.multi_scale:
-                sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
+                sz = random.randrange(
+                    int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
                 sf = sz / max(imgs.shape[2:])  # scale factor
                 if sf != 1:
-                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
-                    imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
+                    # new shape (stretched to gs-multiple)
+                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]
+                    imgs = nn.functional.interpolate(
+                        imgs, size=ns, mode="bilinear", align_corners=False)
 
             # Forward
             with torch.cuda.amp.autocast(amp):
                 pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                loss, loss_items = compute_loss(
+                    pred, targets.to(device))  # loss scaled by batch_size
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -423,7 +462,8 @@ def train(hyp, opt, device, callbacks):
             # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
             if ni - last_opt_step >= accumulate:
                 scaler.unscale_(optimizer)  # unscale gradients
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=10.0)  # clip gradients
                 scaler.step(optimizer)  # optimizer.step
                 scaler.update()
                 optimizer.zero_grad()
@@ -433,13 +473,16 @@ def train(hyp, opt, device, callbacks):
 
             # Log
             if RANK in {-1, 0}:
-                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
-                mem = f"{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G"  # (GB)
+                mloss = (mloss * i + loss_items) / \
+                    (i + 1)  # update mean losses
+                # (GB)
+                mem = f"{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G"
                 pbar.set_description(
                     ("%11s" * 2 + "%11.4g" * 5)
                     % (f"{epoch}/{epochs - 1}", mem, *mloss, targets.shape[0], imgs.shape[-1])
                 )
-                callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss))
+                callbacks.run("on_train_batch_end", model, ni,
+                              imgs, targets, paths, list(mloss))
                 if callbacks.stop_training:
                     return
             # end batch ------------------------------------------------------------------------------------------------
@@ -451,7 +494,8 @@ def train(hyp, opt, device, callbacks):
         if RANK in {-1, 0}:
             # mAP
             callbacks.run("on_train_epoch_end", epoch=epoch)
-            ema.update_attr(model, include=["yaml", "nc", "hyp", "names", "stride", "class_weights"])
+            ema.update_attr(
+                model, include=["yaml", "nc", "hyp", "names", "stride", "class_weights"])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
             if not noval or final_epoch:  # Calculate mAP
                 results, maps, _ = validate.run(
@@ -469,12 +513,14 @@ def train(hyp, opt, device, callbacks):
                 )
 
             # Update best mAP
-            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
+            # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
+            fi = fitness(np.array(results).reshape(1, -1))
             stop = stopper(epoch=epoch, fitness=fi)  # early stop check
             if fi > best_fitness:
                 best_fitness = fi
             log_vals = list(mloss) + list(results) + lr
-            callbacks.run("on_fit_epoch_end", log_vals, epoch, best_fitness, fi)
+            callbacks.run("on_fit_epoch_end", log_vals,
+                          epoch, best_fitness, fi)
 
             # Save model
             if (not nosave) or (final_epoch and not evolve):  # if save
@@ -497,12 +543,14 @@ def train(hyp, opt, device, callbacks):
                 if opt.save_period > 0 and epoch % opt.save_period == 0:
                     torch.save(ckpt, w / f"epoch{epoch}.pt")
                 del ckpt
-                callbacks.run("on_model_save", last, epoch, final_epoch, best_fitness, fi)
+                callbacks.run("on_model_save", last, epoch,
+                              final_epoch, best_fitness, fi)
 
         # EarlyStopping
         if RANK != -1:  # if DDP training
             broadcast_list = [stop if RANK == 0 else None]
-            dist.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
+            # broadcast 'stop' to all ranks
+            dist.broadcast_object_list(broadcast_list, 0)
             if RANK != 0:
                 stop = broadcast_list[0]
         if stop:
@@ -511,7 +559,8 @@ def train(hyp, opt, device, callbacks):
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training -----------------------------------------------------------------------------------------------------
     if RANK in {-1, 0}:
-        LOGGER.info(f"\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.")
+        LOGGER.info(
+            f"\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.")
         for f in last, best:
             if f.exists():
                 strip_optimizer(f)  # strip optimizers
@@ -533,7 +582,8 @@ def train(hyp, opt, device, callbacks):
                         compute_loss=compute_loss,
                     )  # val best model with plots
                     if is_coco:
-                        callbacks.run("on_fit_epoch_end", list(mloss) + list(results) + lr, epoch, best_fitness, fi)
+                        callbacks.run("on_fit_epoch_end", list(
+                            mloss) + list(results) + lr, epoch, best_fitness, fi)
 
         callbacks.run("on_train_end", last, best, epoch, results)
 
@@ -541,7 +591,16 @@ def train(hyp, opt, device, callbacks):
     return results
 
 
+# 这个函数是用来解析命令行参数的，返回一个argparse.Namespace对象，包含了YOLOv5执行的选项
+# known意思是
 def parse_opt(known=False):
+    # 第一行：一个用于解析 YOLOv5 训练、验证和测试的命令行参数的功能
+    # 第二行：如果 known 设置为 True，函数将只解析已知的命令行参数，忽略未知的参数。
+    # 如果调用函数时没有提供 known 参数，它将默认设置为 False。
+    # 这意味着函数在默认情况下会解析所有参数，包括未知的参数。
+    # 第三行：函数返回一个 argparse.Namespace 对象。
+    # argparse.Namespace 是 Python 标准库 argparse 模块中的一个类，用于存储解析后的命令行参数。
+    # 解析后的参数存储在 argparse.Namespace 对象中，用户可以通过访问该对象的属性来获取具体的参数值。
     """
     Parse command-line arguments for YOLOv5 training, validation, and testing.
 
@@ -563,56 +622,108 @@ def parse_opt(known=False):
         - Datasets: https://github.com/ultralytics/yolov5/tree/master/data
         - Tutorial: https://docs.ultralytics.com/yolov5/tutorials/train_custom_data
     """
+
+    # 代码实例化了一个 ArgumentParser 对象，并将其赋值给变量 parser。
     parser = argparse.ArgumentParser()
-    parser.add_argument("--weights", type=str, default=ROOT / "yolov5s.pt", help="initial weights path")
+    # 代码添加了一些命令行参数，用于配置 YOLOv5 的训练和验证过程。
+    # 代码中的每个 add_argument() 方法都会添加一个命令行参数。
+    parser.add_argument("--weights", type=str, default=ROOT /
+                        "yolov5s.pt", help="initial weights path")
     parser.add_argument("--cfg", type=str, default="", help="model.yaml path")
-    parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
-    parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")
-    parser.add_argument("--epochs", type=int, default=100, help="total training epochs")
-    parser.add_argument("--batch-size", type=int, default=16, help="total batch size for all GPUs, -1 for autobatch")
-    parser.add_argument("--imgsz", "--img", "--img-size", type=int, default=640, help="train, val image size (pixels)")
-    parser.add_argument("--rect", action="store_true", help="rectangular training")
-    parser.add_argument("--resume", nargs="?", const=True, default=False, help="resume most recent training")
-    parser.add_argument("--nosave", action="store_true", help="only save final checkpoint")
-    parser.add_argument("--noval", action="store_true", help="only validate final epoch")
-    parser.add_argument("--noautoanchor", action="store_true", help="disable AutoAnchor")
-    parser.add_argument("--noplots", action="store_true", help="save no plot files")
-    parser.add_argument("--evolve", type=int, nargs="?", const=300, help="evolve hyperparameters for x generations")
+    parser.add_argument("--data", type=str, default=ROOT /
+                        "data/coco128.yaml", help="dataset.yaml path")
+    parser.add_argument("--hyp", type=str, default=ROOT /
+                        "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")
+    parser.add_argument("--epochs", type=int, default=100,
+                        help="total training epochs")
+    parser.add_argument("--batch-size", type=int, default=16,
+                        help="total batch size for all GPUs, -1 for autobatch")
+    parser.add_argument("--imgsz", "--img", "--img-size", type=int,
+                        default=640, help="train, val image size (pixels)")
+    parser.add_argument("--rect", action="store_true",
+                        help="rectangular training")
+    parser.add_argument("--resume", nargs="?", const=True,
+                        default=False, help="resume most recent training")
+    parser.add_argument("--nosave", action="store_true",
+                        help="only save final checkpoint")
+    parser.add_argument("--noval", action="store_true",
+                        help="only validate final epoch")
+    parser.add_argument("--noautoanchor", action="store_true",
+                        help="disable AutoAnchor")
+    parser.add_argument("--noplots", action="store_true",
+                        help="save no plot files")
+    parser.add_argument("--evolve", type=int, nargs="?", const=300,
+                        help="evolve hyperparameters for x generations")
     parser.add_argument(
         "--evolve_population", type=str, default=ROOT / "data/hyps", help="location for loading population"
     )
-    parser.add_argument("--resume_evolve", type=str, default=None, help="resume evolve from last generation")
+    parser.add_argument("--resume_evolve", type=str, default=None,
+                        help="resume evolve from last generation")
     parser.add_argument("--bucket", type=str, default="", help="gsutil bucket")
-    parser.add_argument("--cache", type=str, nargs="?", const="ram", help="image --cache ram/disk")
-    parser.add_argument("--image-weights", action="store_true", help="use weighted image selection for training")
-    parser.add_argument("--device", default="", help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
-    parser.add_argument("--multi-scale", action="store_true", help="vary img-size +/- 50%%")
-    parser.add_argument("--single-cls", action="store_true", help="train multi-class data as single-class")
-    parser.add_argument("--optimizer", type=str, choices=["SGD", "Adam", "AdamW"], default="SGD", help="optimizer")
-    parser.add_argument("--sync-bn", action="store_true", help="use SyncBatchNorm, only available in DDP mode")
-    parser.add_argument("--workers", type=int, default=8, help="max dataloader workers (per RANK in DDP mode)")
-    parser.add_argument("--project", default=ROOT / "runs/train", help="save to project/name")
+    parser.add_argument("--cache", type=str, nargs="?",
+                        const="ram", help="image --cache ram/disk")
+    parser.add_argument("--image-weights", action="store_true",
+                        help="use weighted image selection for training")
+    parser.add_argument("--device", default="",
+                        help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
+    parser.add_argument("--multi-scale", action="store_true",
+                        help="vary img-size +/- 50%%")
+    parser.add_argument("--single-cls", action="store_true",
+                        help="train multi-class data as single-class")
+    parser.add_argument("--optimizer", type=str,
+                        choices=["SGD", "Adam", "AdamW"], default="SGD", help="optimizer")
+    parser.add_argument("--sync-bn", action="store_true",
+                        help="use SyncBatchNorm, only available in DDP mode")
+    parser.add_argument("--workers", type=int, default=8,
+                        help="max dataloader workers (per RANK in DDP mode)")
+    parser.add_argument("--project", default=ROOT /
+                        "runs/train", help="save to project/name")
     parser.add_argument("--name", default="exp", help="save to project/name")
-    parser.add_argument("--exist-ok", action="store_true", help="existing project/name ok, do not increment")
+    parser.add_argument("--exist-ok", action="store_true",
+                        help="existing project/name ok, do not increment")
     parser.add_argument("--quad", action="store_true", help="quad dataloader")
-    parser.add_argument("--cos-lr", action="store_true", help="cosine LR scheduler")
-    parser.add_argument("--label-smoothing", type=float, default=0.0, help="Label smoothing epsilon")
-    parser.add_argument("--patience", type=int, default=100, help="EarlyStopping patience (epochs without improvement)")
-    parser.add_argument("--freeze", nargs="+", type=int, default=[0], help="Freeze layers: backbone=10, first3=0 1 2")
-    parser.add_argument("--save-period", type=int, default=-1, help="Save checkpoint every x epochs (disabled if < 1)")
-    parser.add_argument("--seed", type=int, default=0, help="Global training seed")
-    parser.add_argument("--local_rank", type=int, default=-1, help="Automatic DDP Multi-GPU argument, do not modify")
+    parser.add_argument("--cos-lr", action="store_true",
+                        help="cosine LR scheduler")
+    parser.add_argument("--label-smoothing", type=float,
+                        default=0.0, help="Label smoothing epsilon")
+    parser.add_argument("--patience", type=int, default=100,
+                        help="EarlyStopping patience (epochs without improvement)")
+    parser.add_argument("--freeze", nargs="+", type=int,
+                        default=[0], help="Freeze layers: backbone=10, first3=0 1 2")
+    parser.add_argument("--save-period", type=int, default=-1,
+                        help="Save checkpoint every x epochs (disabled if < 1)")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Global training seed")
+    parser.add_argument("--local_rank", type=int, default=-1,
+                        help="Automatic DDP Multi-GPU argument, do not modify")
 
-    # Logger arguments
+    # Logger arguments 日志记录参数
     parser.add_argument("--entity", default=None, help="Entity")
-    parser.add_argument("--upload_dataset", nargs="?", const=True, default=False, help='Upload data, "val" option')
-    parser.add_argument("--bbox_interval", type=int, default=-1, help="Set bounding-box image logging interval")
-    parser.add_argument("--artifact_alias", type=str, default="latest", help="Version of dataset artifact to use")
+    parser.add_argument("--upload_dataset", nargs="?", const=True,
+                        default=False, help='Upload data, "val" option')
+    parser.add_argument("--bbox_interval", type=int, default=-1,
+                        help="Set bounding-box image logging interval")
+    parser.add_argument("--artifact_alias", type=str,
+                        default="latest", help="Version of dataset artifact to use")
 
-    # NDJSON logging
-    parser.add_argument("--ndjson-console", action="store_true", help="Log ndjson to console")
-    parser.add_argument("--ndjson-file", action="store_true", help="Log ndjson to file")
+    # NDJSON logging 日志记录  NDJSON 是一种日志记录格式，用于记录结构化数据
+    parser.add_argument("--ndjson-console",
+                        action="store_true", help="Log ndjson to console")
+    parser.add_argument("--ndjson-file", action="store_true",
+                        help="Log ndjson to file")
 
+    # 根据 known 参数的值来决定调用哪种解析方法。
+    # 如果 known 为 True，调用 parse_known_args() 方法解析已知的参数。
+    # parse_known_args() 方法解析已知的命令行参数，并返回一个包含两个元素的元组：
+    # 第一个元素是解析后的参数对象（Namespace），第二个元素是未解析的参数列表。
+    # 通过 [0] 索引，只返回解析后的参数对象。这种方式允许脚本忽略未知的命令行参数，而不会因为未知参数而报错。
+    # 如果 known 为 False，调用 parse_args() 方法解析所有参数。
+    # parse_args() 方法解析所有命令行参数，并在遇到未知参数时抛出错误。
+    # 这种方式确保所有传递给脚本的参数都是预定义的和已知的，从而避免意外的参数输入。
+    # 通过这种方式，代码实现了灵活的命令行参数解析机制：
+    # 当 known 为 True 时，脚本会忽略未知的参数，只解析已知的参数。
+    # 这在某些情况下非常有用，例如当脚本需要与其他工具或脚本集成时，可能会接收到一些不相关的参数。
+    # 当 known 为 False 时，脚本会严格解析所有参数，并在遇到未知参数时报错。这确保了参数输入的准确性和一致性。
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
 
@@ -639,7 +750,8 @@ def main(opt, callbacks=Callbacks()):
 
     # Resume (from specified or most recent last.pt)
     if opt.resume and not check_comet_resume(opt) and not opt.evolve:
-        last = Path(check_file(opt.resume) if isinstance(opt.resume, str) else get_latest_run())
+        last = Path(check_file(opt.resume) if isinstance(
+            opt.resume, str) else get_latest_run())
         opt_yaml = last.parent.parent / "opt.yaml"  # train options yaml
         opt_data = opt.data  # original dataset
         if opt_yaml.is_file():
@@ -659,14 +771,18 @@ def main(opt, callbacks=Callbacks()):
             str(opt.weights),
             str(opt.project),
         )  # checks
-        assert len(opt.cfg) or len(opt.weights), "either --cfg or --weights must be specified"
+        assert len(opt.cfg) or len(
+            opt.weights), "either --cfg or --weights must be specified"
         if opt.evolve:
-            if opt.project == str(ROOT / "runs/train"):  # if default project name, rename to runs/evolve
+            # if default project name, rename to runs/evolve
+            if opt.project == str(ROOT / "runs/train"):
                 opt.project = str(ROOT / "runs/evolve")
-            opt.exist_ok, opt.resume = opt.resume, False  # pass resume to exist_ok and disable resume
+            # pass resume to exist_ok and disable resume
+            opt.exist_ok, opt.resume = opt.resume, False
         if opt.name == "cfg":
             opt.name = Path(opt.cfg).stem  # use model.yaml as name
-        opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
+        opt.save_dir = str(increment_path(
+            Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
 
     # DDP mode
     device = select_device(opt.device, batch_size=opt.batch_size)
@@ -674,7 +790,8 @@ def main(opt, callbacks=Callbacks()):
         msg = "is not compatible with YOLOv5 Multi-GPU DDP training"
         assert not opt.image_weights, f"--image-weights {msg}"
         assert not opt.evolve, f"--evolve {msg}"
-        assert opt.batch_size != -1, f"AutoBatch with --batch-size -1 {msg}, please pass a valid --batch-size"
+        assert opt.batch_size != - \
+            1, f"AutoBatch with --batch-size -1 {msg}, please pass a valid --batch-size"
         assert opt.batch_size % WORLD_SIZE == 0, f"--batch-size {opt.batch_size} must be multiple of WORLD_SIZE"
         assert torch.cuda.device_count() > LOCAL_RANK, "insufficient CUDA devices for DDP command"
         torch.cuda.set_device(LOCAL_RANK)
@@ -691,8 +808,10 @@ def main(opt, callbacks=Callbacks()):
     else:
         # Hyperparameter evolution metadata (including this hyperparameter True-False, lower_limit, upper_limit)
         meta = {
-            "lr0": (False, 1e-5, 1e-1),  # initial learning rate (SGD=1E-2, Adam=1E-3)
-            "lrf": (False, 0.01, 1.0),  # final OneCycleLR learning rate (lr0 * lrf)
+            # initial learning rate (SGD=1E-2, Adam=1E-3)
+            "lr0": (False, 1e-5, 1e-1),
+            # final OneCycleLR learning rate (lr0 * lrf)
+            "lrf": (False, 0.01, 1.0),
             "momentum": (False, 0.6, 0.98),  # SGD momentum/Adam beta1
             "weight_decay": (False, 0.0, 0.001),  # optimizer weight decay
             "warmup_epochs": (False, 0.0, 5.0),  # warmup epochs (fractions ok)
@@ -705,16 +824,21 @@ def main(opt, callbacks=Callbacks()):
             "obj_pw": (False, 0.5, 2.0),  # obj BCELoss positive_weight
             "iou_t": (False, 0.1, 0.7),  # IoU training threshold
             "anchor_t": (False, 2.0, 8.0),  # anchor-multiple threshold
-            "anchors": (False, 2.0, 10.0),  # anchors per output grid (0 to ignore)
-            "fl_gamma": (False, 0.0, 2.0),  # focal loss gamma (efficientDet default gamma=1.5)
+            # anchors per output grid (0 to ignore)
+            "anchors": (False, 2.0, 10.0),
+            # focal loss gamma (efficientDet default gamma=1.5)
+            "fl_gamma": (False, 0.0, 2.0),
             "hsv_h": (True, 0.0, 0.1),  # image HSV-Hue augmentation (fraction)
-            "hsv_s": (True, 0.0, 0.9),  # image HSV-Saturation augmentation (fraction)
-            "hsv_v": (True, 0.0, 0.9),  # image HSV-Value augmentation (fraction)
+            # image HSV-Saturation augmentation (fraction)
+            "hsv_s": (True, 0.0, 0.9),
+            # image HSV-Value augmentation (fraction)
+            "hsv_v": (True, 0.0, 0.9),
             "degrees": (True, 0.0, 45.0),  # image rotation (+/- deg)
             "translate": (True, 0.0, 0.9),  # image translation (+/- fraction)
             "scale": (True, 0.0, 0.9),  # image scale (+/- gain)
             "shear": (True, 0.0, 10.0),  # image shear (+/- deg)
-            "perspective": (True, 0.0, 0.001),  # image perspective (+/- fraction), range 0-0.001
+            # image perspective (+/- fraction), range 0-0.001
+            "perspective": (True, 0.0, 0.001),
             "flipud": (True, 0.0, 1.0),  # image flip up-down (probability)
             "fliplr": (True, 0.0, 1.0),  # image flip left-right (probability)
             "mosaic": (True, 0.0, 1.0),  # image mixup (probability)
@@ -739,7 +863,8 @@ def main(opt, callbacks=Callbacks()):
                 hyp["anchors"] = 3
         if opt.noautoanchor:
             del hyp["anchors"], meta["anchors"]
-        opt.noval, opt.nosave, save_dir = True, True, Path(opt.save_dir)  # only val/save final epoch
+        opt.noval, opt.nosave, save_dir = True, True, Path(
+            opt.save_dir)  # only val/save final epoch
         # ei = [isinstance(x, (int, float)) for x in hyp.values()]  # evolvable indices
         evolve_yaml, evolve_csv = save_dir / "hyp_evolve.yaml", save_dir / "evolve.csv"
         if opt.bucket:
@@ -765,14 +890,16 @@ def main(opt, callbacks=Callbacks()):
         upper_limit = np.array([meta[k][2] for k in hyp_GA.keys()])
 
         # Create gene_ranges list to hold the range of values for each gene in the population
-        gene_ranges = [(lower_limit[i], upper_limit[i]) for i in range(len(upper_limit))]
+        gene_ranges = [(lower_limit[i], upper_limit[i])
+                       for i in range(len(upper_limit))]
 
         # Initialize the population with initial_values or random values
         initial_values = []
 
         # If resuming evolution from a previous checkpoint
         if opt.resume_evolve is not None:
-            assert os.path.isfile(ROOT / opt.resume_evolve), "evolve population path is wrong!"
+            assert os.path.isfile(
+                ROOT / opt.resume_evolve), "evolve population path is wrong!"
             with open(ROOT / opt.resume_evolve, errors="ignore") as f:
                 evolve_population = yaml.safe_load(f)
                 for value in evolve_population.values():
@@ -781,7 +908,8 @@ def main(opt, callbacks=Callbacks()):
 
         # If not resuming from a previous checkpoint, generate initial values from .yaml files in opt.evolve_population
         else:
-            yaml_files = [f for f in os.listdir(opt.evolve_population) if f.endswith(".yaml")]
+            yaml_files = [f for f in os.listdir(
+                opt.evolve_population) if f.endswith(".yaml")]
             for file_name in yaml_files:
                 with open(os.path.join(opt.evolve_population, file_name)) as yaml_file:
                     value = yaml.safe_load(yaml_file)
@@ -790,9 +918,11 @@ def main(opt, callbacks=Callbacks()):
 
         # Generate random values within the search space for the rest of the population
         if initial_values is None:
-            population = [generate_individual(gene_ranges, len(hyp_GA)) for _ in range(pop_size)]
+            population = [generate_individual(
+                gene_ranges, len(hyp_GA)) for _ in range(pop_size)]
         elif pop_size > 1:
-            population = [generate_individual(gene_ranges, len(hyp_GA)) for _ in range(pop_size - len(initial_values))]
+            population = [generate_individual(gene_ranges, len(
+                hyp_GA)) for _ in range(pop_size - len(initial_values))]
             for initial_value in initial_values:
                 population = [initial_value] + population
 
@@ -802,14 +932,17 @@ def main(opt, callbacks=Callbacks()):
             if generation >= 1:
                 save_dict = {}
                 for i in range(len(population)):
-                    little_dict = {list_keys[j]: float(population[i][j]) for j in range(len(population[i]))}
+                    little_dict = {list_keys[j]: float(
+                        population[i][j]) for j in range(len(population[i]))}
                     save_dict[f"gen{str(generation)}number{str(i)}"] = little_dict
 
                 with open(save_dir / "evolve_population.yaml", "w") as outfile:
                     yaml.dump(save_dict, outfile, default_flow_style=False)
 
             # Adaptive elite size
-            elite_size = min_elite_size + int((max_elite_size - min_elite_size) * (generation / opt.evolve))
+            elite_size = min_elite_size + \
+                int((max_elite_size - min_elite_size)
+                    * (generation / opt.evolve))
             # Evaluate the fitness of each individual in the population
             fitness_scores = []
             for individual in population:
@@ -837,39 +970,50 @@ def main(opt, callbacks=Callbacks()):
                 # Adaptive tournament size
                 tournament_size = max(
                     max(2, tournament_size_min),
-                    int(min(tournament_size_max, pop_size) - (generation / (opt.evolve / 10))),
+                    int(min(tournament_size_max, pop_size) -
+                        (generation / (opt.evolve / 10))),
                 )
                 # Perform tournament selection to choose the best individual
-                tournament_indices = random.sample(range(pop_size), tournament_size)
-                tournament_fitness = [fitness_scores[j] for j in tournament_indices]
-                winner_index = tournament_indices[tournament_fitness.index(max(tournament_fitness))]
+                tournament_indices = random.sample(
+                    range(pop_size), tournament_size)
+                tournament_fitness = [fitness_scores[j]
+                                      for j in tournament_indices]
+                winner_index = tournament_indices[tournament_fitness.index(
+                    max(tournament_fitness))]
                 selected_indices.append(winner_index)
 
             # Add the elite individuals to the selected indices
-            elite_indices = [i for i in range(pop_size) if fitness_scores[i] in sorted(fitness_scores)[-elite_size:]]
+            elite_indices = [i for i in range(
+                pop_size) if fitness_scores[i] in sorted(fitness_scores)[-elite_size:]]
             selected_indices.extend(elite_indices)
             # Create the next generation through crossover and mutation
             next_generation = []
             for _ in range(pop_size):
-                parent1_index = selected_indices[random.randint(0, pop_size - 1)]
-                parent2_index = selected_indices[random.randint(0, pop_size - 1)]
+                parent1_index = selected_indices[random.randint(
+                    0, pop_size - 1)]
+                parent2_index = selected_indices[random.randint(
+                    0, pop_size - 1)]
                 # Adaptive crossover rate
                 crossover_rate = max(
-                    crossover_rate_min, min(crossover_rate_max, crossover_rate_max - (generation / opt.evolve))
+                    crossover_rate_min, min(
+                        crossover_rate_max, crossover_rate_max - (generation / opt.evolve))
                 )
                 if random.uniform(0, 1) < crossover_rate:
                     crossover_point = random.randint(1, len(hyp_GA) - 1)
-                    child = population[parent1_index][:crossover_point] + population[parent2_index][crossover_point:]
+                    child = population[parent1_index][:crossover_point] + \
+                        population[parent2_index][crossover_point:]
                 else:
                     child = population[parent1_index]
                 # Adaptive mutation rate
                 mutation_rate = max(
-                    mutation_rate_min, min(mutation_rate_max, mutation_rate_max - (generation / opt.evolve))
+                    mutation_rate_min, min(
+                        mutation_rate_max, mutation_rate_max - (generation / opt.evolve))
                 )
                 for j in range(len(hyp_GA)):
                     if random.uniform(0, 1) < mutation_rate:
                         child[j] += random.uniform(-0.1, 0.1)
-                        child[j] = min(max(child[j], gene_ranges[j][0]), gene_ranges[j][1])
+                        child[j] = min(
+                            max(child[j], gene_ranges[j][0]), gene_ranges[j][1])
                 next_generation.append(child)
             # Replace the old population with the new generation
             population = next_generation
@@ -981,6 +1125,12 @@ def run(**kwargs):
     return opt
 
 
+# if __name__ == "__main__": 是一个常见的 Python 结构，
+# 用于确保某些代码仅在脚本作为主程序运行时执行，而不是在它被作为模块导入时执行。
+# 具体来说，当 Python 解释器运行一个脚本时，它会将特殊变量 __name__ 设为 "__main__"。
+# 如果该脚本被导入到另一个脚本中，__name__ 的值将是该脚本的文件名，而不是 "__main__"。
 if __name__ == "__main__":
+    # parse_opt() 函数用来解析命令行参数，并返回一个包含这些参数的 argparse.Namespace 对象。
+    # 通过解析命令行参数，用户可以在运行脚本时指定不同的选项和配置，从而灵活地控制脚本的行为。
     opt = parse_opt()
     main(opt)
