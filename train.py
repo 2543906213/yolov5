@@ -771,6 +771,8 @@ def main(opt, callbacks=Callbacks()):
     # Resume (from specified or most recent last.pt)
     # 检查 opt.resume 是否为 True，如果是，则表示需要恢复最近的训练检查点。
     # 这段代码处理了训练过程中的恢复选项，决定是否从之前的检查点恢复训练。
+    # opt.resume 是一个命令行选项，用于指示是否从之前的检查点恢复训练。
+    # 在训练深度学习模型时，恢复训练可以节省时间和资源，因为可以从上次中断的地方继续，而不必从头开始。
     '''首先检查是否需要恢复训练。条件包括 opt.resume 为真，
      且 check_comet_resume(opt) 和 opt.evolve 都为假。'''
     if opt.resume and not check_comet_resume(opt) and not opt.evolve:
@@ -779,13 +781,20 @@ def main(opt, callbacks=Callbacks()):
         否则，调用 get_latest_run() 获取最近的运行记录。'''
         last = Path(check_file(opt.resume) if isinstance(
             opt.resume, str) else get_latest_run())
+        # 构建一个指向 opt.yaml 文件的路径，并将其存储在变量 opt_yaml 中
         opt_yaml = last.parent.parent / "opt.yaml"  # train options yaml
         opt_data = opt.data  # original dataset
         if opt_yaml.is_file():
+            # errors="ignore" 参数用于忽略文件读取过程中可能出现的编码错误。
             with open(opt_yaml, errors="ignore") as f:
+                # 使用 yaml.safe_load(f) 将 YAML 文件的内容加载到字典 d 中
                 d = yaml.safe_load(f)
         else:
+            # 从一个保存的 PyTorch 模型文件中加载特定的配置选项，并将其存储在变量 d 中
+            # map_location="cpu" 参数指定了将所有加载的张量映射到 CPU 上。
+            # 这在没有 GPU 或不需要使用 GPU 时非常有用，可以避免 GPU 内存的占用。
             d = torch.load(last, map_location="cpu")["opt"]
+            # **d 是一种特殊的语法，称为字典解包（dictionary unpacking）
         opt = argparse.Namespace(**d)  # replace
         opt.cfg, opt.weights, opt.resume = "", str(last), True  # reinstate
         if is_url(opt_data):
