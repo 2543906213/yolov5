@@ -104,6 +104,8 @@ GIT_INFO = check_git_info()
 
 
 def train(hyp, opt, device, callbacks):
+    # 函数的主要功能是管理数据集、模型架构、损失计算和优化步骤，以便在指定设备上训练 YOLOv5 模型。该函数不返回任何值。
+    # 该函数接受四个参数：超参数 hyp，训练选项 opt，设备 device 和回调函数 callbacks。
     """
     Train a YOLOv5 model on a custom dataset using specified hyperparameters, options, and device, managing datasets,
     model architecture, loss computation, and optimizer steps.
@@ -119,68 +121,64 @@ def train(hyp, opt, device, callbacks):
 
     Models and datasets download automatically from the latest YOLOv5 release.
 
-    Example:
-        Single-GPU training:
-        ```bash
-        $ python train.py --data coco128.yaml --weights yolov5s.pt --img 640  # from pretrained (recommended)
-        $ python train.py --data coco128.yaml --weights '' --cfg yolov5s.yaml --img 640  # from scratch
-        ```
-
-        Multi-GPU DDP training:
-        ```bash
-        $ python -m torch.distributed.run --nproc_per_node 4 --master_port 1 train.py --data coco128.yaml --weights
-        yolov5s.pt --img 640 --device 0,1,2,3
-        ```
-
         For more usage details, refer to:
         - Models: https://github.com/ultralytics/yolov5/tree/master/models
         - Datasets: https://github.com/ultralytics/yolov5/tree/master/data
         - Tutorial: https://docs.ultralytics.com/yolov5/tutorials/train_custom_data
     """
     save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = (
-        Path(opt.save_dir),
-        opt.epochs,
-        opt.batch_size,
-        opt.weights,
-        opt.single_cls,
-        opt.evolve,
-        opt.data,
-        opt.cfg,
-        opt.resume,
-        opt.noval,
-        opt.nosave,
-        opt.workers,
-        opt.freeze,
+        Path(opt.save_dir),  # 保存训练结果的目录路径
+        opt.epochs,  # 训练的总轮数
+        opt.batch_size,  # 每个批次的大小
+        opt.weights,  # 预训练权重的路径
+        opt.single_cls,  # 是否将多类数据集训练为单类
+        opt.evolve,  # 是否进行超参数进化
+        opt.data,  # 数据集配置文件的路径
+        opt.cfg,  # 模型配置文件的路径
+        opt.resume,  # 是否从最近的训练中恢复
+        opt.noval,  # 是否只在最后一个 epoch 进行验证
+        opt.nosave,  # 是否只保存最终的检查点
+        opt.workers,  # 数据加载器的最大工作进程数
+        opt.freeze,  # 需要冻结的层
     )
+    # 在训练开始之前运行 on_pretrain_routine_start 回调函数
     callbacks.run("on_pretrain_routine_start")
 
-    # Directories
-    w = save_dir / "weights"  # weights dir
-    (w.parent if evolve else w).mkdir(parents=True, exist_ok=True)  # make dir
+    # 为训练过程中保存权重文件创建一个目录，并定义两个文件路径用于存储最新和最佳的模型权重。
+    w = save_dir / "weights"  # 权重文件将被保存的目录
+    # 如果 evolve 为真，则创建 w 的父目录；否则，直接创建 w 目录。
+    # mkdir 方法的参数 parents=True 表示如果父目录不存在，则会递归创建所有必需的父目录；
+    # exist_ok=True 表示如果目录已经存在，则不会引发异常。
+    (w.parent if evolve else w).mkdir(parents=True, exist_ok=True)
+    # last, best表示最新模型权重文件和最佳模型权重文件的路径。
     last, best = w / "last.pt", w / "best.pt"
 
-    # Hyperparameters
+    # 加载和记录训练过程中使用的超参数，并将其保存到选项对象中，以便在训练检查点中使用。
     if isinstance(hyp, str):
         with open(hyp, errors="ignore") as f:
             hyp = yaml.safe_load(f)  # load hyps dict
+            # 记录加载的超参数
     LOGGER.info(colorstr("hyperparameters: ") +
                 ", ".join(f"{k}={v}" for k, v in hyp.items()))
+    # 将超参数字典的副本赋值给 opt.hyp，以便在保存训练检查点时使用这些超参数。
     opt.hyp = hyp.copy()  # for saving hyps to checkpoints
 
-    # Save run settings
+    # 在训练过程中保存运行设置，包括超参数和选项参数
     if not evolve:
         yaml_save(save_dir / "hyp.yaml", hyp)
         yaml_save(save_dir / "opt.yaml", vars(opt))
 
-    # Loggers
+    # 根据当前的运行环境和选项配置
     data_dict = None
+    # 代码检查变量 RANK 是否在集合 {-1, 0} 中，如果是，则表示当前进程是主进程或单机运行，此时需要初始化日志记录器。
     if RANK in {-1, 0}:
-        include_loggers = list(LOGGERS)
+        include_loggers = list(LOGGERS)  # 创建了一个包含默认日志记录器的列表
         if getattr(opt, "ndjson_console", False):
             include_loggers.append("ndjson_console")
         if getattr(opt, "ndjson_file", False):
             include_loggers.append("ndjson_file")
 
+        # 用于管理和记录训练过程中的各种日志信息
         loggers = Loggers(
             save_dir=save_dir,
             weights=weights,
@@ -190,21 +188,22 @@ def train(hyp, opt, device, callbacks):
             include=tuple(include_loggers),
         )
 
-        # Register actions
+        # 注册日志记录器（loggers）中的方法作为回调函数
         for k in methods(loggers):
             callbacks.register_action(k, callback=getattr(loggers, k))
 
-        # Process custom dataset artifact link
+        # 处理自定义数据集的链接
         data_dict = loggers.remote_dataset
-        if resume:  # If resuming runs from remote artifact
+        if resume:  # 是否从远程存储恢复训练
             weights, epochs, hyp, batch_size = opt.weights, opt.epochs, opt.hyp, opt.batch_size
 
-    # Config
-    plots = not evolve and not opt.noplots  # create plots
+    # 配置训练过程中的一些关键参数和环境设置
+    plots = not evolve and not opt.noplots  # 通过检查变量 evolve 和 opt.noplots 来决定是否生成绘图
     cuda = device.type != "cpu"
+    # 初始化随机数生成器的种子，并设置确定性选项。
     init_seeds(opt.seed + 1 + RANK, deterministic=True)
-    with torch_distributed_zero_first(LOCAL_RANK):
-        data_dict = data_dict or check_dataset(data)  # check if None
+    with torch_distributed_zero_first(LOCAL_RANK):  # 代码确保在分布式训练中按顺序执行操作。
+        data_dict = data_dict or check_dataset(data)  # 验证或自动下载数据集，并返回其配置字典。
     train_path, val_path = data_dict["train"], data_dict["val"]
     nc = 1 if single_cls else int(data_dict["nc"])  # number of classes
     names = {0: "item"} if single_cls and len(
@@ -592,9 +591,12 @@ def train(hyp, opt, device, callbacks):
     torch.cuda.empty_cache()
     return results
 
+# =======================================================================================================================
 
 # 这个函数是用来解析命令行参数的，返回一个argparse.Namespace对象，包含了YOLOv5执行的选项
 # known意思是
+
+
 def parse_opt(known=False):
     # 第一行：一个用于解析 YOLOv5 训练、验证和测试的命令行参数的功能
     # 第二行：如果 known 设置为 True，函数将只解析已知的命令行参数，忽略未知的参数。
@@ -728,6 +730,8 @@ def parse_opt(known=False):
     # 当 known 为 False 时，脚本会严格解析所有参数，并在遇到未知参数时报错。这确保了参数输入的准确性和一致性。
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
+# =======================================================================================================================
+
 
 def main(opt, callbacks=Callbacks()):
 
@@ -795,8 +799,10 @@ def main(opt, callbacks=Callbacks()):
             # 这在没有 GPU 或不需要使用 GPU 时非常有用，可以避免 GPU 内存的占用。
             d = torch.load(last, map_location="cpu")["opt"]
             # **d 是一种特殊的语法，称为字典解包（dictionary unpacking）
+            # 将字典 d 转换为一个命名空间对象
         opt = argparse.Namespace(**d)  # replace
-        opt.cfg, opt.weights, opt.resume = "", str(last), True  # reinstate
+        # reinstate 对opt里面的这三个参数进行重新赋值
+        opt.cfg, opt.weights, opt.resume = "", str(last), True
         if is_url(opt_data):
             opt.data = check_file(opt_data)  # avoid HUB resume auth timeout
     else:
@@ -807,21 +813,28 @@ def main(opt, callbacks=Callbacks()):
             str(opt.weights),
             str(opt.project),
         )  # checks
+        # 通过断言语句确保在运行脚本时，配置文件 (cfg) 或权重文件 (weights) 至少有一个被指定。
+        # 断言语句的作用是检查一个条件，如果条件为假，则抛出一个 AssertionError 异常，并显示指定的错误消息。
         assert len(opt.cfg) or len(
-            opt.weights), "either --cfg or --weights must be specified"
+            opt.weights),   "either --cfg or --weights must be specified"
         if opt.evolve:
-            # if default project name, rename to runs/evolve
             if opt.project == str(ROOT / "runs/train"):
                 opt.project = str(ROOT / "runs/evolve")
-            # pass resume to exist_ok and disable resume
+            # 确保在进化模式下，项目路径可以被覆盖，但不会继续之前的训练。
             opt.exist_ok, opt.resume = opt.resume, False
         if opt.name == "cfg":
+            # stem 是 Path 类的一个属性，它返回路径的最后一个组成部分（即文件名），但不包括文件扩展名。
+            # 例如，如果 opt.cfg 的值是 "config.yaml"，则 Path(opt.cfg).stem 的值将是 "config"。
             opt.name = Path(opt.cfg).stem  # use model.yaml as name
         opt.save_dir = str(increment_path(
             Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
 
     # DDP mode
+    # 分布式数据并行（DDP）模式
+    # 选择计算设备（CPU、CUDA GPU 或 MPS）。
+    # 这个函数会根据可用的硬件资源和用户指定的设备来选择最合适的设备，并返回一个 torch.device 对象。
     device = select_device(opt.device, batch_size=opt.batch_size)
+    # 如果 LOCAL_RANK 不等于 -1，则表示当前进程是一个 DDP 进程。
     if LOCAL_RANK != -1:
         msg = "is not compatible with YOLOv5 Multi-GPU DDP training"
         assert not opt.image_weights, f"--image-weights {msg}"
@@ -836,15 +849,18 @@ def main(opt, callbacks=Callbacks()):
             backend="nccl" if dist.is_nccl_available() else "gloo", timeout=timedelta(seconds=10800)
         )
 
-    # Train
+    # Train 函数负责整个训练过程，包括数据集管理、模型架构、损失计算和优化步骤。
+    # 它接受一些参数，包括opt.hyp超参数、opt包含训练选项和参数的对象、device设备、callbacks回调函数等。
     if not opt.evolve:
         train(opt.hyp, opt, device, callbacks)
 
     # Evolve hyperparameters (optional)
     else:
+        # 字典meta，用于存储超参数进化的元数据
         # Hyperparameter evolution metadata (including this hyperparameter True-False, lower_limit, upper_limit)
         meta = {
             # initial learning rate (SGD=1E-2, Adam=1E-3)
+            #
             "lr0": (False, 1e-5, 1e-1),
             # final OneCycleLR learning rate (lr0 * lrf)
             "lrf": (False, 0.01, 1.0),
@@ -882,29 +898,35 @@ def main(opt, callbacks=Callbacks()):
             "copy_paste": (True, 0.0, 1.0),
         }  # segment copy-paste (probability)
 
-        # GA configs
-        pop_size = 50
-        mutation_rate_min = 0.01
-        mutation_rate_max = 0.5
-        crossover_rate_min = 0.5
-        crossover_rate_max = 1
-        min_elite_size = 2
-        max_elite_size = 5
-        tournament_size_min = 2
-        tournament_size_max = 10
+        # GA configs定义了遗传算法（Genetic Algorithm, GA）的配置参数，用于优化模型的超参数。
+        pop_size = 50  # 种群大小
+        mutation_rate_min = 0.01  # 变异率最小值
+        mutation_rate_max = 0.5  # 变异率最大值
+        crossover_rate_min = 0.5  # 交叉率最小值
+        crossover_rate_max = 1  # 交叉率最大值
+        min_elite_size = 2  # 最小精英个数
+        max_elite_size = 5  # 最大精英个数
+        tournament_size_min = 2  # 锦标赛选择的最小个数
+        tournament_size_max = 10  # 锦标赛选择的最大个数
 
         with open(opt.hyp, errors="ignore") as f:
-            hyp = yaml.safe_load(f)  # load hyps dict
-            if "anchors" not in hyp:  # anchors commented in hyp.yaml
+            hyp = yaml.safe_load(f)  # 加载超参数配置
+            if "anchors" not in hyp:  # 设置键 "anchors" 的默认值为 3
                 hyp["anchors"] = 3
         if opt.noautoanchor:
+            # 如果 opt.noautoanchor 为 True，则从 hyp 和 meta 字典中删除 "anchors" 键。
             del hyp["anchors"], meta["anchors"]
         opt.noval, opt.nosave, save_dir = True, True, Path(
-            opt.save_dir)  # only val/save final epoch
-        # ei = [isinstance(x, (int, float)) for x in hyp.values()]  # evolvable indices
+            opt.save_dir)  # 设置选项和保存目录
+        # 定义进化文件路径
         evolve_yaml, evolve_csv = save_dir / "hyp_evolve.yaml", save_dir / "evolve.csv"
+        # 从云存储下载文件
         if opt.bucket:
             # download evolve.csv if exists
+            # "gsutil"：Google Cloud Storage 的命令行工具，用于与 GCS 进行交互。
+            # "cp"：gsutil 的子命令，表示复制文件。
+            # f"gs://{opt.bucket}/evolve.csv"：源文件路径，使用格式化字符串将 opt.bucket 的值插入到 GCS URL 中。
+            # str(evolve_csv)：目标文件路径，将下载的文件保存到本地的 evolve_csv 路径。
             subprocess.run(
                 [
                     "gsutil",
@@ -914,25 +936,29 @@ def main(opt, callbacks=Callbacks()):
                 ]
             )
 
-        # Delete the items in meta dictionary whose first value is False
-        del_ = [item for item, value_ in meta.items() if value_[0] is False]
-        hyp_GA = hyp.copy()  # Make a copy of hyp dictionary
+        # 删除 meta 字典中第一个值为 False 的项。
+        del_ = [item for item, value_ in meta.items() if value_[0]
+                is False]  # 筛选出需要删除的项
+        hyp_GA = hyp.copy()  # 复制超参数字典
         for item in del_:
-            del meta[item]  # Remove the item from meta dictionary
-            del hyp_GA[item]  # Remove the item from hyp_GA dictionary
+            del meta[item]  # 从 meta 字典中删除项
+            del hyp_GA[item]  # 从 hyp_GA 字典中删除项
 
-        # Set lower_limit and upper_limit arrays to hold the search space boundaries
+        # 定义了两个数组，用于存储搜索空间的边界
+        # 这些边界是通过从 meta 字典中提取特定键的值来确定的。
         lower_limit = np.array([meta[k][1] for k in hyp_GA.keys()])
         upper_limit = np.array([meta[k][2] for k in hyp_GA.keys()])
 
-        # Create gene_ranges list to hold the range of values for each gene in the population
+        # 创建了一个名为 gene_ranges 的列表，用于存储每个基因在种群中的取值范围。
+        # 这个列表的每个元素都是一个元组，包含了对应基因的下边界和上边界。
         gene_ranges = [(lower_limit[i], upper_limit[i])
                        for i in range(len(upper_limit))]
 
-        # Initialize the population with initial_values or random values
+        # 种群的初始状态将被设置为特定的初始值或随机生成的值。
         initial_values = []
 
-        # If resuming evolution from a previous checkpoint
+        # 处理了从先前的检查点恢复进化的情况
+        # 如果选项 opt.resume_evolve 不为 None，则表示我们希望从一个先前保存的进化状态继续。
         if opt.resume_evolve is not None:
             assert os.path.isfile(
                 ROOT / opt.resume_evolve), "evolve population path is wrong!"
@@ -942,7 +968,8 @@ def main(opt, callbacks=Callbacks()):
                     value = np.array([value[k] for k in hyp_GA.keys()])
                     initial_values.append(list(value))
 
-        # If not resuming from a previous checkpoint, generate initial values from .yaml files in opt.evolve_population
+        # 处理了不从先前检查点恢复进化的情况
+        # 如果选项 opt.resume_evolve 为 None，则代码将从指定目录中的 .yaml 文件生成初始值。
         else:
             yaml_files = [f for f in os.listdir(
                 opt.evolve_population) if f.endswith(".yaml")]
@@ -952,7 +979,8 @@ def main(opt, callbacks=Callbacks()):
                     value = np.array([value[k] for k in hyp_GA.keys()])
                     initial_values.append(list(value))
 
-        # Generate random values within the search space for the rest of the population
+        # 生成了种群的初始个体，这些个体的基因值在指定的搜索空间内随机生成。
+        # 根据给定的基因范围和个体长度生成一个包含随机超参数的个体。
         if initial_values is None:
             population = [generate_individual(
                 gene_ranges, len(hyp_GA)) for _ in range(pop_size)]
@@ -963,8 +991,13 @@ def main(opt, callbacks=Callbacks()):
                 population = [initial_value] + population
 
         # Run the genetic algorithm for a fixed number of generations
+        # 实现了一个遗传算法，用于优化超参数
+        # 首先，代码将 hyp_GA 的键转换为列表 list_keys，以便后续使用。
         list_keys = list(hyp_GA.keys())
+        # 在一个固定的代数范围内（由 opt.evolve 指定），代码循环执行遗传算法的各个步骤。
         for generation in range(opt.evolve):
+            # 在每一代中，如果代数大于等于1，代码会将当前种群的超参数保存到一个字典 save_dict 中，
+            # 并将其写入到 evolve_population.yaml 文件中。
             if generation >= 1:
                 save_dict = {}
                 for i in range(len(population)):
@@ -975,11 +1008,13 @@ def main(opt, callbacks=Callbacks()):
                 with open(save_dir / "evolve_population.yaml", "w") as outfile:
                     yaml.dump(save_dict, outfile, default_flow_style=False)
 
-            # Adaptive elite size
+            # 接下来，代码计算自适应精英大小 elite_size，该值随着代数的增加而变化。
             elite_size = min_elite_size + \
                 int((max_elite_size - min_elite_size)
                     * (generation / opt.evolve))
-            # Evaluate the fitness of each individual in the population
+            # 评估种群中每个个体的适应度。
+            # 对于每个个体，代码将其超参数更新到 hyp_GA 中，并调用 train 函数进行训练，
+            # 返回的结果用于计算适应度分数 fitness_scores。
             fitness_scores = []
             for individual in population:
                 for key, value in zip(hyp_GA.keys(), individual):
@@ -997,19 +1032,20 @@ def main(opt, callbacks=Callbacks()):
                     "val/obj_loss",
                     "val/cls_loss",
                 )
+                # 训练完成后，代码会记录一些关键的训练结果，并将其打印出来。
                 print_mutation(keys, results, hyp.copy(), save_dir, opt.bucket)
                 fitness_scores.append(results[2])
 
-            # Select the fittest individuals for reproduction using adaptive tournament selection
+            # 使用自适应锦标赛选择算法选择适应度最高的个体进行繁殖。
             selected_indices = []
             for _ in range(pop_size - elite_size):
-                # Adaptive tournament size
+                # 锦标赛大小 tournament_size 也是自适应的，随着代数的增加而变化。
                 tournament_size = max(
                     max(2, tournament_size_min),
                     int(min(tournament_size_max, pop_size) -
                         (generation / (opt.evolve / 10))),
                 )
-                # Perform tournament selection to choose the best individual
+                # 使用锦标赛选择来挑选最优个体
                 tournament_indices = random.sample(
                     range(pop_size), tournament_size)
                 tournament_fitness = [fitness_scores[j]
@@ -1018,18 +1054,18 @@ def main(opt, callbacks=Callbacks()):
                     max(tournament_fitness))]
                 selected_indices.append(winner_index)
 
-            # Add the elite individuals to the selected indices
+            # 通过锦标赛选择，代码确定了用于繁殖的个体索引 selected_indices，并将精英个体添加到该列表中。
             elite_indices = [i for i in range(
                 pop_size) if fitness_scores[i] in sorted(fitness_scores)[-elite_size:]]
             selected_indices.extend(elite_indices)
-            # Create the next generation through crossover and mutation
+            # 在生成下一代时，代码通过交叉和变异操作创建新的个体。
             next_generation = []
             for _ in range(pop_size):
                 parent1_index = selected_indices[random.randint(
                     0, pop_size - 1)]
                 parent2_index = selected_indices[random.randint(
                     0, pop_size - 1)]
-                # Adaptive crossover rate
+                # 交叉率crossover_rate是自适应的
                 crossover_rate = max(
                     crossover_rate_min, min(
                         crossover_rate_max, crossover_rate_max - (generation / opt.evolve))
@@ -1040,7 +1076,7 @@ def main(opt, callbacks=Callbacks()):
                         population[parent2_index][crossover_point:]
                 else:
                     child = population[parent1_index]
-                # Adaptive mutation rate
+                # 变异率 mutation_rate 也是自适应的
                 mutation_rate = max(
                     mutation_rate_min, min(
                         mutation_rate_max, mutation_rate_max - (generation / opt.evolve))
@@ -1051,14 +1087,15 @@ def main(opt, callbacks=Callbacks()):
                         child[j] = min(
                             max(child[j], gene_ranges[j][0]), gene_ranges[j][1])
                 next_generation.append(child)
-            # Replace the old population with the new generation
+            # 用新一代替换旧种群
             population = next_generation
-        # Print the best solution found
+        # 打印出找到的最佳解决方案
         best_index = fitness_scores.index(max(fitness_scores))
         best_individual = population[best_index]
         print("Best solution found:", best_individual)
-        # Plot results
+        # 并绘制结果图表。
         plot_evolve(evolve_csv)
+        # 日志信息记录了超参数进化的完成情况和结果保存的位置。
         LOGGER.info(
             f'Hyperparameter evolution finished {opt.evolve} generations\n'
             f"Results saved to {colorstr('bold', save_dir)}\n"
@@ -1067,6 +1104,11 @@ def main(opt, callbacks=Callbacks()):
 
 
 def generate_individual(input_ranges, individual_length):
+    # 用于生成一个具有随机超参数的个体。
+    # 该函数接受两个参数：input_ranges 和 individual_length。
+    # input_ranges 是一个包含元组的列表，每个元组包含对应基因（超参数）的下限和上限。
+    # individual_length 是个体中基因（超参数）的数量。
+    # 函数的返回值是一个浮点数列表，表示生成的个体，其中每个基因值都在指定的范围内。
     """
     Generate an individual with random hyperparameters within specified ranges.
 
@@ -1090,10 +1132,11 @@ def generate_individual(input_ranges, individual_length):
         The individual returned will have a length equal to `individual_length`, with each gene value being a floating-point
         number within its specified range in `input_ranges`.
     """
-    individual = []
+    individual = []  # 用于存储生成的个体
     for i in range(individual_length):
         lower_bound, upper_bound = input_ranges[i]
-        individual.append(random.uniform(lower_bound, upper_bound))
+        individual.append(random.uniform(
+            lower_bound, upper_bound))  # 生成一个随机超参数
     return individual
 
 
@@ -1154,10 +1197,10 @@ def run(**kwargs):
         - Datasets: https://github.com/ultralytics/yolov5/tree/master/data
         - Tutorial: https://docs.ultralytics.com/yolov5/tutorials/train_custom_data
     """
-    opt = parse_opt(True)
+    opt = parse_opt(True)  # 解析命令行参数
     for k, v in kwargs.items():
-        setattr(opt, k, v)
-    main(opt)
+        setattr(opt, k, v)  # 使用 setattr 函数将每个参数的值设置到 opt 对象中。
+    main(opt)  # 调用 main 函数，开始训练或超参数进化的主要流程。
     return opt
 
 
