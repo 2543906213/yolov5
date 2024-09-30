@@ -205,16 +205,17 @@ def train(hyp, opt, device, callbacks):
     with torch_distributed_zero_first(LOCAL_RANK):  # 代码确保在分布式训练中按顺序执行操作。
         data_dict = data_dict or check_dataset(data)  # 验证或自动下载数据集，并返回其配置字典。
     train_path, val_path = data_dict["train"], data_dict["val"]
-    nc = 1 if single_cls else int(data_dict["nc"])  # number of classes
+    nc = 1 if single_cls else int(data_dict["nc"])  # 获取类别数量并转换为整数
     names = {0: "item"} if single_cls and len(
-        data_dict["names"]) != 1 else data_dict["names"]  # class names
+        data_dict["names"]) != 1 else data_dict["names"]  # 确定类别名称
     is_coco = isinstance(val_path, str) and val_path.endswith(
-        "coco/val2017.txt")  # COCO dataset
+        "coco/val2017.txt")  # 以确定数据集是否为 COCO 数据集，并将结果赋值给 is_coco 变量。
 
     # Model
-    check_suffix(weights, ".pt")  # check weights
+    check_suffix(weights, ".pt")  # 检查权重文件的后缀是否为 .pt
     pretrained = weights.endswith(".pt")
     if pretrained:
+        # 用于同步不同进程对数据读取的上下文管理器
         with torch_distributed_zero_first(LOCAL_RANK):
             # download if not found locally
             weights = attempt_download(weights)
@@ -236,7 +237,7 @@ def train(hyp, opt, device, callbacks):
             "anchors")).to(device)  # create
     amp = check_amp(model)  # check AMP
 
-    # Freeze
+    # 冻结权重层
     freeze = [f"model.{x}." for x in (freeze if len(
         freeze) > 1 else range(freeze[0]))]  # layers to freeze
     for k, v in model.named_parameters():
